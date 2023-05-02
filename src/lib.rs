@@ -73,7 +73,7 @@ fn init_db(db_path: &str) -> Result<HashMap<String, Key>> {
     let conn = Connection::open(db_path)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Keys (
-       name     TEXT,
+       name     TEXT PRIMARY KEY,
        public_key   TEXT,
        private_key  TEXT,
        active BOOL
