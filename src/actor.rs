@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -18,7 +18,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::AppState;
+use crate::{protocol::JsonLD, AppState};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NewActor {
@@ -46,6 +46,7 @@ pub enum ActorError {
     Internal(anyhow::Error),
     LoginFailed,
     Duplicate(String),
+    UnknownActor(String),
 }
 
 impl IntoResponse for ActorError {
@@ -57,6 +58,10 @@ impl IntoResponse for ActorError {
             ),
             ActorError::Internal(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
             ActorError::LoginFailed => (StatusCode::UNAUTHORIZED, String::from("login failed")),
+            ActorError::UnknownActor(name) => (
+                StatusCode::NOT_FOUND,
+                format!("username `{name}` not found"),
+            ),
         };
         tracing::error!(error_message);
         let body = Json(json!({
@@ -109,16 +114,16 @@ pub(crate) async fn create_actor(
     );
     let digest_b64 = BASE64_STANDARD_NO_PAD.encode(digest);
     let rsa = Rsa::generate(2048)?;
-    let private_b64 = BASE64_STANDARD_NO_PAD.encode(rsa.private_key_to_pem()?);
-    let public_b64 = BASE64_STANDARD_NO_PAD.encode(rsa.public_key_to_pem()?);
+    let private = String::from_utf8(rsa.private_key_to_pem()?)?;
+    let public = String::from_utf8(rsa.public_key_to_pem()?)?;
     let conn = Connection::open(&state.db_path)?;
     match conn.execute(
         "INSERT INTO Actors VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         (
             &new_actor.username,
             &new_actor.email,
-            &public_b64,
-            &private_b64,
+            public,
+            private,
             &salt_b64,
             &digest_b64,
         ),
@@ -127,9 +132,9 @@ pub(crate) async fn create_actor(
         Err(rusqlite::Error::SqliteFailure(err, msg))
             if err.code == ErrorCode::ConstraintViolation
                 && matches!(&msg,Some(msg) if msg.contains("UNIQUE") && msg.contains("Actors.username")) =>
-            {
-                return Err(ActorError::Duplicate(new_actor.username))
-            }
+        {
+            return Err(ActorError::Duplicate(new_actor.username))
+        }
         Err(err) => {
             return Err(ActorError::Internal(anyhow!(err)));
         }
@@ -157,7 +162,7 @@ pub(crate) async fn login(
         |row| Ok((row.get(0)?, row.get(1)?)),
     ) {
         Ok(data) => data,
-        Err(rusqlite::Error::QueryReturnedNoRows) =>  return Err(ActorError::LoginFailed),
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Err(ActorError::LoginFailed),
         Err(err) => return Err(ActorError::Internal(anyhow!(err))),
     };
     let digest = digest(&SHA256, format!("{}{salt}", login.password).as_bytes());
@@ -174,6 +179,74 @@ pub(crate) async fn login(
         new_user: false,
     };
     Ok(Json(logged))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Actor {
+    #[serde(rename = "@context")]
+    context: Vec<String>,
+    id: String,
+    #[serde(rename = "type")]
+    r#type: String,
+    inbox: String,
+    public_key: PublicKey,
+    followers: String,
+    following: String,
+    liked: String,
+    outbox: String,
+    preferred_username: String,
+}
+
+impl Actor {
+    fn new(username: String, base: &str, public_key_pem: String) -> Self {
+        Actor {
+            context: vec![
+                "https://www.w3.org/ns/activitystreams".into(),
+                "https://w3id.org/security/v1".into(),
+            ],
+            id: format!("https://{base}/actors/{username}"),
+            r#type: "Person".into(),
+            inbox: format!("https://{base}/actors/{username}/inbox"),
+            public_key: PublicKey {
+                id: format!("https://{base}/actors/{username}#main-key"),
+                owner: format!("https://{base}/actors/{username}"),
+                public_key_pem,
+            },
+            followers: format!("https://{base}/actors/{username}/followers"),
+            following: format!("https://{base}/actors/{username}/following"),
+            liked: format!("https://{base}/actors/{username}/liked"),
+            outbox: format!("https://{base}/actors/{username}/outbox"),
+            preferred_username: username,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicKey {
+    id: String,
+    owner: String,
+    public_key_pem: String,
+}
+
+pub(crate) async fn get_actor(
+    State(state): State<Arc<AppState>>,
+    Path(username): Path<String>,
+) -> Result<JsonLD<Actor>, ActorError> {
+    let conn = Connection::open(&state.db_path)?;
+    let public_key = match conn.query_row(
+        "SELECT public_key FROM Actors where username=?1",
+        [&username],
+        |row| row.get(0),
+    ) {
+        Ok(data) => data,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(ActorError::UnknownActor(username))
+        }
+        Err(err) => return Err(ActorError::Internal(anyhow!(err))),
+    };
+    Ok(JsonLD(Actor::new(username, &state.base, public_key)))
 }
 
 fn token(state: &AppState, web_id: &str) -> Result<String> {

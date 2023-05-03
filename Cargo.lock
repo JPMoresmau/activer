@@ -7,8 +7,11 @@ name = "activer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "axum-core",
  "base64 0.21.0",
+ "bytes",
  "http",
  "hyper",
  "jsonwebtoken",
@@ -19,6 +22,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "tokio",
  "tower",
  "tower-http",

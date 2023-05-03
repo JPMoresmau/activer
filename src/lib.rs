@@ -1,7 +1,10 @@
 //! Web service API implementation.
 
 use anyhow::{anyhow, Result};
-use axum::{routing::post, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use http::Method;
 use jsonwebtoken::{DecodingKey, EncodingKey};
@@ -14,10 +17,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tower_http::cors::{Any, CorsLayer};
+use webfinger::resource;
 
 mod actor;
 pub use actor::Claims;
-use actor::{create_actor, login};
+use actor::{create_actor, get_actor, login};
+mod protocol;
+mod webfinger;
 
 pub struct Key {
     pub name: String,
@@ -147,7 +153,9 @@ pub fn app(base: &str, db_path: &str) -> Result<Router> {
 
     let app = Router::new()
         .route("/actors", post(create_actor))
+        .route("/actors/:username", get(get_actor))
         .route("/login", post(login))
+        .route("/.well-known/webfinger", get(resource))
         .with_state(runner_state)
         .layer(cors);
 

@@ -20,6 +20,11 @@ ring = "0.16.20"
 base64 = "0.21.0"
 openssl = "0.10.52"
 jsonwebtoken = "8.3.0"
+async-trait = "0.1.68"
+axum-core = "0.3.4"
+bytes = "1.4.0"
+mime = "0.3.17"
+serde_path_to_error = "0.1.11"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
