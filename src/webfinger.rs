@@ -7,7 +7,6 @@ use axum::{
 };
 use axum_core::response::{IntoResponse, Response};
 use http::StatusCode;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -80,7 +79,7 @@ pub(crate) async fn resource(
     match query.resource.split_once(':') {
         Some(("acct", account)) => match account.split_once('@') {
             Some((username, base)) if base == state.base => {
-                let conn = Connection::open(&state.db_path)?;
+                let conn = &state.conn()?;
                 let _: i32 = match conn.query_row(
                     "SELECT 1 FROM Actors where username=?1",
                     [&username],

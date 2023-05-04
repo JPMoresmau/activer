@@ -15,8 +15,18 @@ use http::{
 };
 use mime::Mime;
 use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
+
+pub(crate) const PUBLIC: &str = "https://www.w3.org/ns/activitystreams#Public";
 
 pub(crate) const LD_CONTENT_TYPE: &str = "application/ld+json";
+
+pub(crate) const LD_CONTENT_TYPE_PROFILE: &str =
+    "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
+
+pub(crate) const ACTIVITIES: [&str; 9] = [
+    "Create", "Update", "Delete", "Follow", "Add", "Remove", "Like", "Block", "Undo",
+];
 
 define_rejection! {
     #[status = UNPROCESSABLE_ENTITY]
@@ -113,11 +123,15 @@ fn json_content_type(headers: &HeaderMap) -> bool {
         return false;
     };
 
-    let is_json_content_type = mime.type_() == "application"
+    let is_ld_content_type = mime.type_() == "application"
         && mime.subtype() == "ld"
         && mime.suffix().map(|n| n.as_str()) == Some("json");
 
-    is_json_content_type
+    let is_activity_content_type = mime.type_() == "application"
+        && mime.subtype() == "activity"
+        && mime.suffix().map(|n| n.as_str()) == Some("json");
+
+    is_ld_content_type || is_activity_content_type
 }
 
 axum_core::__impl_deref!(JsonLD);
@@ -140,7 +154,7 @@ where
             Ok(()) => (
                 [(
                     header::CONTENT_TYPE,
-                    HeaderValue::from_static(LD_CONTENT_TYPE),
+                    HeaderValue::from_static(LD_CONTENT_TYPE_PROFILE),
                 )],
                 buf.into_inner().freeze(),
             )
@@ -155,5 +169,55 @@ where
             )
                 .into_response(),
         }
+    }
+}
+
+pub(crate) struct Created {
+    id: Option<String>,
+}
+
+impl Created {
+    pub(crate) fn new(id: Option<String>) -> Self {
+        Created { id }
+    }
+}
+
+impl IntoResponse for Created {
+    fn into_response(self) -> Response {
+        match self.id {
+            Some(id) => (
+                StatusCode::CREATED,
+                [(header::LOCATION, HeaderValue::from_str(&id).unwrap())],
+            )
+                .into_response(),
+            None => StatusCode::CREATED.into_response(),
+        }
+    }
+}
+
+pub(crate) fn recipients(value: &Value) -> Vec<&str> {
+    let mut v = Vec::new();
+    for field in ["to", "bto", "cc", "bcc"] {
+        collect_strings(value, field, &mut v);
+    }
+    v
+}
+
+/*
+pub(crate) fn is_public(value: &Value) -> bool{
+    recipients(value).iter().any(|r| *r == PUBLIC)
+}
+ */
+
+fn collect_strings<'a>(value: &'a Value, field: &str, col: &mut Vec<&'a str>) {
+    if let Some(vs) = value.get(field).and_then(Value::as_array) {
+        for v in vs {
+            if let Some(s) = v.as_str() {
+                col.push(s)
+            }
+        }
+    }
+    if let Some(s) = value.get(field).and_then(Value::as_str) {
+        col.push(s);
     }
 }

@@ -9,8 +9,10 @@ use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use http::Method;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use openssl::rsa::Rsa;
+
+use r2d2::{Pool, PooledConnection};
+use r2d2_sqlite::SqliteConnectionManager;
 use ring::rand::SystemRandom;
-use rusqlite::Connection;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -22,7 +24,12 @@ use webfinger::resource;
 mod actor;
 pub use actor::Claims;
 use actor::{create_actor, get_actor, login};
+mod outbox;
+use outbox::post_outbox;
+mod object;
 mod protocol;
+use object::get_object;
+
 mod webfinger;
 
 pub struct Key {
@@ -63,7 +70,7 @@ impl Key {
 /// State.
 struct AppState {
     base: String,
-    db_path: String,
+    pool: Pool<SqliteConnectionManager>,
     random: SystemRandom,
     keys: HashMap<String, Key>,
     // encryption_key: String,
@@ -73,13 +80,18 @@ impl AppState {
     fn active_key(&self) -> &Key {
         self.keys.values().find(|k| k.active).unwrap()
     }
+
+    fn conn(&self) -> Result<PooledConnection<SqliteConnectionManager>> {
+        let conn = self.pool.get()?;
+        Ok(conn)
+    }
 }
 
-fn init_db(db_path: &str) -> Result<HashMap<String, Key>> {
-    let conn = Connection::open(db_path)?;
+fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<HashMap<String, Key>> {
+    let conn = pool.get()?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Keys (
-       name     TEXT PRIMARY KEY,
+       name         TEXT PRIMARY KEY,
        public_key   TEXT,
        private_key  TEXT,
        active BOOL
@@ -94,6 +106,28 @@ fn init_db(db_path: &str) -> Result<HashMap<String, Key>> {
         private_key  TEXT,
         salt         TEXT,
         password     TEXT
+    )",
+        (),
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Outbox (
+            username      TEXT REFERENCES Actors (username),
+            id            TEXT,
+            activity_type TEXT,
+            created       INTEGER,
+            data          TEXT,
+            PRIMARY KEY (username, id)
+    )",
+        (),
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Objects (
+            username      TEXT REFERENCES Actors (username),
+            id            TEXT,
+            object_type TEXT,
+            created       INTEGER,
+            data          TEXT,
+            PRIMARY KEY (username, id)
     )",
         (),
     )?;
@@ -137,11 +171,14 @@ fn init_db(db_path: &str) -> Result<HashMap<String, Key>> {
 
 /// App routes.
 pub fn app(base: &str, db_path: &str) -> Result<Router> {
-    let keys = init_db(db_path)?;
+    let manager = SqliteConnectionManager::file(db_path);
+    let pool = r2d2::Pool::new(manager).unwrap();
+
+    let keys = init_db(&pool)?;
 
     let runner_state = Arc::new(AppState {
         base: base.to_string(),
-        db_path: db_path.to_string(),
+        pool,
         random: SystemRandom::new(),
         keys,
     });
@@ -154,6 +191,11 @@ pub fn app(base: &str, db_path: &str) -> Result<Router> {
     let app = Router::new()
         .route("/actors", post(create_actor))
         .route("/actors/:username", get(get_actor))
+        .route("/actors/:username/outbox", post(post_outbox))
+        .route(
+            "/actors/:username/objects/:object_type/:object_id",
+            get(get_object),
+        )
         .route("/login", post(login))
         .route("/.well-known/webfinger", get(resource))
         .with_state(runner_state)

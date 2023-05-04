@@ -1,3 +1,4 @@
+use crate::{protocol::JsonLD, AppState};
 use anyhow::{anyhow, Result};
 use axum::{
     extract::{Path, State},
@@ -6,19 +7,19 @@ use axum::{
     Json,
 };
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
-use jsonwebtoken::{encode, Algorithm, Header};
-use openssl::rsa::Rsa;
+use jsonwebtoken::{decode, decode_header, encode, Algorithm, Header, Validation};
+use openssl::{error::ErrorStack, rsa::Rsa};
 use ring::digest::{digest, SHA256};
 use ring::rand::SecureRandom;
-use rusqlite::{Connection, ErrorCode};
+use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    string::FromUtf8Error,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-use crate::{protocol::JsonLD, AppState};
+use thiserror::Error;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NewActor {
@@ -42,10 +43,15 @@ pub struct LoggedInActor {
     new_user: bool,
 }
 
+#[derive(Error, Debug)]
 pub enum ActorError {
-    Internal(anyhow::Error),
+    #[error("internal actor error: {0}")]
+    Internal(#[from] anyhow::Error),
+    #[error("login failed")]
     LoginFailed,
+    #[error("duplicate actor {0}")]
     Duplicate(String),
+    #[error("unknown actor {0}")]
     UnknownActor(String),
 }
 
@@ -72,18 +78,17 @@ impl IntoResponse for ActorError {
     }
 }
 
-impl<T> From<T> for ActorError
-where
-    T: Into<anyhow::Error>,
-{
-    fn from(value: T) -> Self {
+impl From<ErrorStack> for ActorError {
+    fn from(value: ErrorStack) -> Self {
         ActorError::Internal(anyhow!(value))
     }
 }
-/*
-impl From<ring::error::Unspecified> for ActorError {
-    fn from(_: ring::error::Unspecified) -> Self { ActorError::Internal(anyhow!("cryptographic error")) }
-}*/
+
+impl From<FromUtf8Error> for ActorError {
+    fn from(value: FromUtf8Error) -> Self {
+        ActorError::Internal(anyhow!(value))
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -116,7 +121,7 @@ pub(crate) async fn create_actor(
     let rsa = Rsa::generate(2048)?;
     let private = String::from_utf8(rsa.private_key_to_pem()?)?;
     let public = String::from_utf8(rsa.public_key_to_pem()?)?;
-    let conn = Connection::open(&state.db_path)?;
+    let conn = &state.conn()?;
     match conn.execute(
         "INSERT INTO Actors VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         (
@@ -155,7 +160,7 @@ pub(crate) async fn login(
     State(state): State<Arc<AppState>>,
     Json(login): Json<Login>,
 ) -> Result<Json<LoggedInActor>, ActorError> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = &state.conn()?;
     let (salt, password): (String, String) = match conn.query_row(
         "SELECT salt,password FROM Actors where username=?1",
         [&login.username],
@@ -234,19 +239,17 @@ pub(crate) async fn get_actor(
     State(state): State<Arc<AppState>>,
     Path(username): Path<String>,
 ) -> Result<JsonLD<Actor>, ActorError> {
-    let conn = Connection::open(&state.db_path)?;
-    let public_key = match conn.query_row(
+    let conn = &state.conn()?;
+    match conn.query_row(
         "SELECT public_key FROM Actors where username=?1",
         [&username],
         |row| row.get(0),
     ) {
-        Ok(data) => data,
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            return Err(ActorError::UnknownActor(username))
-        }
-        Err(err) => return Err(ActorError::Internal(anyhow!(err))),
-    };
-    Ok(JsonLD(Actor::new(username, &state.base, public_key)))
+        Ok(data) => Ok(JsonLD(Actor::new(username, &state.base, data))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(ActorError::UnknownActor(username)),
+
+        Err(err) => Err(ActorError::Internal(anyhow!(err))),
+    }
 }
 
 fn token(state: &AppState, web_id: &str) -> Result<String> {
@@ -262,4 +265,30 @@ fn token(state: &AppState, web_id: &str) -> Result<String> {
     header.kid = Some(key.name.clone());
     let token = encode(&header, &claims, &key.encoding)?;
     Ok(token)
+}
+
+pub(crate) struct ActorRef {
+    pub(crate) web_id: String,
+    pub(crate) username: String,
+}
+
+pub(crate) fn validate(state: &AppState, token: &str) -> Result<ActorRef> {
+    let header = decode_header(token)?;
+    let key = match header.kid {
+        Some(kid) => match state.keys.get(&kid) {
+            Some(key) => key,
+            None => return Err(anyhow!("unknown key {kid}")),
+        },
+        None => state.active_key(),
+    };
+    let claims = decode::<Claims>(token, &key.decoding, &Validation::new(Algorithm::RS256))?;
+    let web_id = claims.claims.web_id;
+    let base = format!("https://{}/actors/", state.base);
+    match web_id.strip_prefix(&base) {
+        Some(username) => Ok(ActorRef {
+            username: username.into(),
+            web_id,
+        }),
+        None => Err(anyhow!("invalid web_id `{web_id}`")),
+    }
 }

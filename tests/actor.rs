@@ -52,7 +52,6 @@ async fn create_actor_and_login() -> Result<()> {
             Request::builder()
                 .method(http::Method::GET)
                 .uri("/actors/john")
-                .header(http::header::CONTENT_TYPE, mime::APPLICATION_JSON.as_ref())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -61,7 +60,7 @@ async fn create_actor_and_login() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").unwrap(),
-        "application/ld+json"
+        "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\""
     );
     let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
     let mut body: Value = serde_json::from_slice(&body).unwrap();
