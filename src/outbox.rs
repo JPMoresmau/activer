@@ -18,8 +18,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    actor::validate,
-    inbox::add_shared_inbox,
+    actor::{actor_id, extract_username, validate},
+    inbox::{add_inbox, add_shared_inbox},
     object::create_object,
     protocol::{clean, recipients, Created, JsonLD, ACTIVITIES, ACTIVITY_STREAMS_NS, PUBLIC},
     util::copy,
@@ -228,9 +228,19 @@ fn postprocess_activity(
                 activity.pointer("/object").unwrap(),
                 iat,
             )?;
+            let actor_id = actor_id(state, username);
             for recipient in recipients.iter() {
                 if recipient == PUBLIC {
                     add_shared_inbox(state, short_id, "Create", activity, iat)?;
+                } else if recipient != &actor_id {
+                    match extract_username(state, recipient) {
+                        Some(rec_username) => {
+                            add_inbox(state, &rec_username, short_id, "Create", activity, iat)?;
+                        }
+                        None => {
+                            unimplemented!("add to federated inbox")
+                        }
+                    }
                 }
             }
         }

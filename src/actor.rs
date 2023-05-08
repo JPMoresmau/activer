@@ -285,12 +285,20 @@ pub(crate) fn validate(state: &AppState, token: &str) -> Result<ActorRef> {
     };
     let claims = decode::<Claims>(token, &key.decoding, &Validation::new(Algorithm::RS256))?;
     let web_id = claims.claims.web_id;
+    match extract_username(state, &web_id) {
+        Some(username) => Ok(ActorRef { username, web_id }),
+        None => Err(anyhow!("invalid web_id `{web_id}`")),
+    }
+}
+
+pub(crate) fn actor_id(state: &AppState, username: &str) -> String {
+    format!("https://{}/actors/{username}", state.base)
+}
+
+pub(crate) fn extract_username(state: &AppState, web_id: &str) -> Option<String> {
     let base = format!("https://{}/actors/", state.base);
     match web_id.strip_prefix(&base) {
-        Some(username) => Ok(ActorRef {
-            username: username.into(),
-            web_id,
-        }),
-        None => Err(anyhow!("invalid web_id `{web_id}`")),
+        Some(username) => Some(username.into()),
+        None => None,
     }
 }

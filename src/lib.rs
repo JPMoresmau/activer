@@ -7,7 +7,7 @@ use axum::{
 };
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use http::Method;
-use inbox::get_shared_inbox;
+use inbox::{get_inbox, get_shared_inbox};
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use openssl::rsa::Rsa;
 
@@ -215,6 +215,7 @@ pub fn app(base: &str, db_path: &str) -> Result<Router> {
         .route("/actors", post(create_actor))
         .route("/actors/:username", get(get_actor))
         .route("/actors/:username/outbox", post(post_outbox))
+        .route("/actors/:username/inbox", get(get_inbox))
         .route(
             "/actors/:username/objects/:object_type/:object_id",
             get(get_object),

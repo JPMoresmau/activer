@@ -224,3 +224,35 @@ async fn get_actor_missing() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn get_inbox_protected() -> Result<()> {
+    let test_app = TestApp::new("get_inbox_protected.db")?;
+    let v = test_app
+        .create_actor("john", "john@example.com", "password1")
+        .await?;
+    let john_token = v.get("token").unwrap().as_str().unwrap();
+    test_app
+        .create_actor("jane", "jane@example.com", "password1")
+        .await?;
+    let response = test_app
+        .app()?
+        .oneshot(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/actors/jane/inbox")
+                .header(http::header::AUTHORIZATION, format!("Bearer {john_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "error": "can only retrieve own inbox",
+        })
+    );
+    Ok(())
+}
