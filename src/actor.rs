@@ -195,6 +195,7 @@ pub struct Actor {
     #[serde(rename = "type")]
     r#type: String,
     inbox: String,
+    shared_inbox: String,
     public_key: PublicKey,
     followers: String,
     following: String,
@@ -213,6 +214,7 @@ impl Actor {
             id: format!("https://{base}/actors/{username}"),
             r#type: "Person".into(),
             inbox: format!("https://{base}/actors/{username}/inbox"),
+            shared_inbox: format!("https://{base}/sharedInbox"),
             public_key: PublicKey {
                 id: format!("https://{base}/actors/{username}#main-key"),
                 owner: format!("https://{base}/actors/{username}"),

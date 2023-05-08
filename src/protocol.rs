@@ -17,7 +17,11 @@ use mime::Mime;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
+use crate::util::collect_strings;
+
 pub(crate) const PUBLIC: &str = "https://www.w3.org/ns/activitystreams#Public";
+
+pub(crate) const ACTIVITY_STREAMS_NS: &str = "https://www.w3.org/ns/activitystreams";
 
 pub(crate) const LD_CONTENT_TYPE: &str = "application/ld+json";
 
@@ -203,21 +207,18 @@ pub(crate) fn recipients(value: &Value) -> Vec<&str> {
     v
 }
 
+pub(crate) fn clean(value: &mut Value) {
+    if let Some(m) = value.as_object_mut() {
+        m.remove("bto");
+        m.remove("bcc");
+        if let Some(v) = m.get_mut("object") {
+            clean(v);
+        }
+    }
+}
+
 /*
 pub(crate) fn is_public(value: &Value) -> bool{
     recipients(value).iter().any(|r| *r == PUBLIC)
 }
  */
-
-fn collect_strings<'a>(value: &'a Value, field: &str, col: &mut Vec<&'a str>) {
-    if let Some(vs) = value.get(field).and_then(Value::as_array) {
-        for v in vs {
-            if let Some(s) = v.as_str() {
-                col.push(s)
-            }
-        }
-    }
-    if let Some(s) = value.get(field).and_then(Value::as_str) {
-        col.push(s);
-    }
-}

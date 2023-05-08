@@ -77,6 +77,7 @@ async fn create_actor_and_login() -> Result<()> {
             "id": "https://example.com/actors/john",
             "type": "Person",
             "inbox": "https://example.com/actors/john/inbox",
+            "sharedInbox": "https://example.com/sharedInbox",
             "publicKey": {
                 "id": "https://example.com/actors/john#main-key",
                 "owner": "https://example.com/actors/john",

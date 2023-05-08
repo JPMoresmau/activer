@@ -63,7 +63,6 @@ pub(crate) async fn get_object(
     State(state): State<Arc<AppState>>,
     Path((username, object_type, object_id)): Path<(String, String, Uuid)>,
 ) -> Result<JsonLD<Value>, ObjectError> {
-    eprintln!("get object {username} {object_type} {object_id}");
     let conn = &state.conn()?;
     let data = match conn.query_row(
         "SELECT data FROM Objects where username=?1 AND object_type=?2 AND id=?3",
@@ -77,7 +76,6 @@ pub(crate) async fn get_object(
 
         Err(err) => return Err(ObjectError::Internal(anyhow!(err))),
     };
-    eprintln!("get object {data}");
     let recipients = recipients(&data);
     if !recipients.iter().any(|r| *r == PUBLIC) {
         match auth {
@@ -112,8 +110,8 @@ pub(crate) fn create_object(
     match conn.execute(
         "INSERT INTO Objects (username, id, object_type, created, data) VALUES (?1, ?2, ?3, ?4, ?5)",
         (
-            &username,
-            &object_id,
+            username,
+            object_id,
             &object_type.to_lowercase(),
             iat,
             object,

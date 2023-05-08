@@ -10,6 +10,7 @@ use chrono::{TimeZone, Utc};
 use rusqlite::ErrorCode;
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{SystemTime, SystemTimeError, UNIX_EPOCH},
 };
@@ -18,8 +19,10 @@ use uuid::Uuid;
 
 use crate::{
     actor::validate,
+    inbox::add_shared_inbox,
     object::create_object,
-    protocol::{Created, JsonLD, ACTIVITIES},
+    protocol::{clean, recipients, Created, JsonLD, ACTIVITIES, ACTIVITY_STREAMS_NS, PUBLIC},
+    util::copy,
     AppState,
 };
 
@@ -27,6 +30,8 @@ use crate::{
 pub enum OutboxError {
     #[error("internal outbox error: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error("outbox operation required authentication: {0}")]
+    NoAuth(anyhow::Error),
     #[error("outbox operation not authorized: {0}")]
     AuthFailed(anyhow::Error),
     #[error("outbox activity {0} already exists")]
@@ -44,7 +49,8 @@ impl IntoResponse for OutboxError {
             ),
             OutboxError::Internal(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
             OutboxError::Invalid(err) => (StatusCode::BAD_REQUEST, err),
-            OutboxError::AuthFailed(err) => (StatusCode::UNAUTHORIZED, err.to_string()),
+            OutboxError::NoAuth(err) => (StatusCode::UNAUTHORIZED, err.to_string()),
+            OutboxError::AuthFailed(err) => (StatusCode::FORBIDDEN, err.to_string()),
         };
         tracing::error!(error_message);
         let body = Json(json!({
@@ -75,7 +81,7 @@ pub(crate) async fn post_outbox(
     JsonLD(mut new_activity): JsonLD<Value>,
 ) -> Result<Created, OutboxError> {
     let token_username = validate(&state, auth.token())
-        .map_err(OutboxError::AuthFailed)?
+        .map_err(OutboxError::NoAuth)?
         .username;
     if token_username != username {
         return Err(OutboxError::AuthFailed(anyhow!(
@@ -83,7 +89,7 @@ pub(crate) async fn post_outbox(
         )));
     }
     let short_id = Uuid::new_v4();
-    let activity_type = match new_activity.pointer("/type").and_then(|v| v.as_str()) {
+    let mut activity_type = match new_activity.pointer("/type").and_then(|v| v.as_str()) {
         Some(activity) => activity.to_string(),
         None => {
             return Err(OutboxError::Invalid(String::from(
@@ -92,9 +98,11 @@ pub(crate) async fn post_outbox(
         }
     };
     if !ACTIVITIES.contains(&activity_type.as_str()) {
+        activity_type = String::from("Create");
         let mut wrap_activity = json!({
+            "@context": ACTIVITY_STREAMS_NS,
             "object": new_activity,
-            "type": "Create",
+            "type": activity_type,
         });
         copy(
             &new_activity,
@@ -114,9 +122,6 @@ pub(crate) async fn post_outbox(
     let iat = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let activity_state =
         preprocess_activity(&state, &username, &mut new_activity, &activity_type, iat)?;
-    /*
-
-    */
 
     let conn = &state.conn()?;
     match conn.execute(
@@ -134,7 +139,14 @@ pub(crate) async fn post_outbox(
             return Err(OutboxError::Internal(anyhow!(err)));
         }
     }
-    postprocess_activity(&state, &username, &mut new_activity, &activity_state, iat)?;
+    postprocess_activity(
+        &state,
+        &username,
+        &short_id,
+        &mut new_activity,
+        &activity_state,
+        iat,
+    )?;
 
     Ok(Created::new(activity_state.location()))
 }
@@ -178,10 +190,16 @@ fn preprocess_activity(
                 )))
             }
         };
+        let recipients = recipients(activity)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        clean(activity);
         return Ok(ActivityState::Create {
             object_type,
             object_short_id,
             object_id,
+            recipients,
         });
     }
     Ok(ActivityState::Other)
@@ -190,6 +208,7 @@ fn preprocess_activity(
 fn postprocess_activity(
     state: &AppState,
     username: &str,
+    short_id: &Uuid,
     activity: &mut Value,
     activity_state: &ActivityState,
     iat: u64,
@@ -198,6 +217,7 @@ fn postprocess_activity(
         ActivityState::Create {
             object_short_id,
             object_type,
+            recipients,
             ..
         } if activity.pointer("/object").is_some() => {
             create_object(
@@ -208,6 +228,11 @@ fn postprocess_activity(
                 activity.pointer("/object").unwrap(),
                 iat,
             )?;
+            for recipient in recipients.iter() {
+                if recipient == PUBLIC {
+                    add_shared_inbox(state, short_id, "Create", activity, iat)?;
+                }
+            }
         }
         _ => {}
     }
@@ -220,6 +245,7 @@ pub enum ActivityState {
         object_type: String,
         object_short_id: Uuid,
         object_id: String,
+        recipients: HashSet<String>,
     },
 }
 
@@ -228,16 +254,6 @@ impl ActivityState {
         match self {
             ActivityState::Create { object_id, .. } => Some(object_id),
             ActivityState::Other => None,
-        }
-    }
-}
-
-fn copy(from: &Value, to: &mut Value, fields: &[&str]) {
-    for field in fields {
-        if let Some(value) = from.get(field) {
-            to.as_object_mut()
-                .unwrap()
-                .insert(field.to_string(), value.clone());
         }
     }
 }

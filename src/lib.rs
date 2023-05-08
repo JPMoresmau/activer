@@ -7,6 +7,7 @@ use axum::{
 };
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use http::Method;
+use inbox::get_shared_inbox;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use openssl::rsa::Rsa;
 
@@ -24,11 +25,13 @@ use webfinger::resource;
 mod actor;
 pub use actor::Claims;
 use actor::{create_actor, get_actor, login};
+mod inbox;
 mod outbox;
 use outbox::post_outbox;
 mod object;
 mod protocol;
 use object::get_object;
+mod util;
 
 mod webfinger;
 
@@ -116,7 +119,7 @@ fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<HashMap<String, Key>>
             activity_type TEXT,
             created       INTEGER,
             data          TEXT,
-            PRIMARY KEY (username, id)
+            PRIMARY KEY  (username, id)
     )",
         (),
     )?;
@@ -124,10 +127,30 @@ fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<HashMap<String, Key>>
         "CREATE TABLE IF NOT EXISTS Objects (
             username      TEXT REFERENCES Actors (username),
             id            TEXT,
-            object_type TEXT,
+            object_type   TEXT,
             created       INTEGER,
             data          TEXT,
-            PRIMARY KEY (username, id)
+            PRIMARY KEY   (username, id)
+    )",
+        (),
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Inbox (
+            username      TEXT REFERENCES Actors (username),
+            id            TEXT,
+            activity_type TEXT,
+            created       INTEGER,
+            data          TEXT,
+            PRIMARY KEY   (username, id)
+    )",
+        (),
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS SharedInbox (
+            id            TEXT PRIMARY KEY,
+            activity_type TEXT,
+            created       INTEGER,
+            data          TEXT
     )",
         (),
     )?;
@@ -198,6 +221,7 @@ pub fn app(base: &str, db_path: &str) -> Result<Router> {
         )
         .route("/login", post(login))
         .route("/.well-known/webfinger", get(resource))
+        .route("/sharedInbox", get(get_shared_inbox))
         .with_state(runner_state)
         .layer(cors);
 
