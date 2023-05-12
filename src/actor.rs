@@ -310,6 +310,7 @@ pub(crate) fn extract_username(state: &AppState, web_id: &str) -> Option<String>
     web_id.strip_prefix(&base).map(|username| username.into())
 }
 
+#[derive(Clone)]
 pub(crate) struct PrivateKey {
     pub(crate) id: String,
     pub(crate) key: PKey<Private>,

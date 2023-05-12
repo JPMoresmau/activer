@@ -19,7 +19,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    actor::{actor_id, extract_username, private_key, validate},
+    actor::{actor_id, extract_username, private_key, validate, PrivateKey},
     inbox::{add_inbox, add_shared_inbox},
     object::create_object,
     protocol::{clean, recipients, Created, JsonLD, ACTIVITIES, ACTIVITY_STREAMS_NS, PUBLIC},
@@ -136,17 +136,18 @@ pub(crate) async fn post_outbox(
             }
         }
     }
+    let ret = Created::new(activity_state.location().map(|s| s.to_owned()));
     postprocess_activity(
-        &state,
+        state,
         &username,
-        &activity_id,
-        &mut new_activity,
-        &activity_state,
+        activity_id,
+        new_activity,
+        activity_state,
         iat,
     )
     .await?;
 
-    Ok(Created::new(activity_state.location()))
+    Ok(ret)
 }
 
 fn preprocess_activity(
@@ -204,13 +205,15 @@ fn preprocess_activity(
 }
 
 async fn postprocess_activity(
-    state: &AppState,
+    state: Arc<AppState>,
     username: &str,
-    activity_id: &str,
-    activity: &mut Value,
-    activity_state: &ActivityState,
+    activity_id: String,
+    activity: Value,
+    activity_state: ActivityState,
     iat: i64,
 ) -> Result<()> {
+    let activity_id = Arc::new(activity_id);
+    let activity = Arc::new(activity);
     match activity_state {
         ActivityState::Create {
             object_short_id,
@@ -219,31 +222,70 @@ async fn postprocess_activity(
             ..
         } if activity.pointer("/object").is_some() => {
             create_object(
-                state,
+                &state,
                 username,
-                object_short_id,
-                object_type,
+                &object_short_id,
+                &object_type,
                 activity.pointer("/object").unwrap(),
                 iat,
             )?;
-            let actor_id = actor_id(state, username);
-            let key = private_key(state, username)?;
-            for recipient in recipients.iter() {
-                if recipient == PUBLIC {
-                    add_shared_inbox(state, activity_id, "Create", activity, iat)?;
-                } else if recipient != &actor_id {
-                    match extract_username(state, recipient) {
-                        Some(rec_username) => {
-                            add_inbox(state, &rec_username, activity_id, "Create", activity, iat)?;
-                        }
-                        None => {
-                            post(state, recipient, &key, activity).await?;
-                        }
+            let actor_id = Arc::new(actor_id(&state, username));
+            let key = Arc::new(private_key(&state, username)?);
+            for recipient in recipients.into_iter() {
+                tokio::spawn({
+                    let st = state.clone();
+                    let actor_id = actor_id.clone();
+                    let key = key.clone();
+                    let activity_id = activity_id.clone();
+                    let activity = activity.clone();
+                    async move {
+                        match send_to_recipient(
+                            st,
+                            &recipient,
+                            &actor_id,
+                            &key,
+                            &activity_id,
+                            &activity,
+                            iat,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                tracing::info!("Sent activity {activity_id} to {recipient}")
+                            }
+                            Err(err) => tracing::error!(
+                                "Sending activity {activity_id} to {recipient} failed: {err}"
+                            ),
+                        };
                     }
-                }
+                });
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+async fn send_to_recipient(
+    state: Arc<AppState>,
+    recipient: &str,
+    actor_id: &str,
+    key: &PrivateKey,
+    activity_id: &str,
+    activity: &Value,
+    iat: i64,
+) -> Result<()> {
+    if recipient == PUBLIC {
+        add_shared_inbox(&state, activity_id, "Create", activity, iat)?;
+    } else if recipient != actor_id {
+        match extract_username(&state, recipient) {
+            Some(rec_username) => {
+                add_inbox(&state, &rec_username, activity_id, "Create", activity, iat)?;
+            }
+            None => {
+                post(&state, recipient, key, activity).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -259,7 +301,7 @@ pub enum ActivityState {
 }
 
 impl ActivityState {
-    fn location(self) -> Option<String> {
+    fn location(&self) -> Option<&str> {
         match self {
             ActivityState::Create { object_id, .. } => Some(object_id),
             ActivityState::Other => None,

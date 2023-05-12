@@ -18,6 +18,7 @@ use utils::TestApp;
 
 #[tokio::test]
 async fn create_note() -> Result<()> {
+    tracing_subscriber::fmt::init();
     test_note_creation(
         "create_note.db",
         "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",
@@ -113,6 +114,7 @@ async fn test_note_creation(db_path: &str, content_type: &str, wrapping: bool) -
             "published": null,
         })
     );
+    tokio::task::yield_now().await;
 
     let response = test_app
         .app()?
@@ -250,6 +252,7 @@ async fn create_note_private() -> Result<()> {
     assert_eq!(response.status(), StatusCode::CREATED);
     let location = response.headers().get("location").unwrap().to_str()?;
     assert!(location.starts_with("https://example.com/actors/john/objects/note/"));
+    tokio::task::yield_now().await;
 
     let response = test_app
         .app()?
