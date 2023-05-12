@@ -17,6 +17,7 @@ use ring::rand::SystemRandom;
 use serde_json::Value;
 use std::{
     collections::HashMap,
+    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -195,7 +196,10 @@ fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<HashMap<String, Key>>
 }
 
 /// App routes.
-pub fn app(base: &str, db_path: &str, cache: HashMap<String, Value>) -> Result<Router> {
+pub fn app<P>(base: &str, db_path: P, cache: HashMap<String, Value>) -> Result<Router>
+where
+    P: AsRef<Path>,
+{
     let manager = SqliteConnectionManager::file(db_path);
     let pool = r2d2::Pool::new(manager).unwrap();
 
