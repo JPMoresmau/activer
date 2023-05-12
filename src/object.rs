@@ -104,7 +104,7 @@ pub(crate) fn create_object(
     object_id: &Uuid,
     object_type: &str,
     object: &Value,
-    iat: u64,
+    iat: i64,
 ) -> Result<(), ObjectError> {
     let conn = &state.conn()?;
     match conn.execute(

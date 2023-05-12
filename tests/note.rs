@@ -1,10 +1,15 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use axum::{
     body::Body,
     http::{self, Request, StatusCode},
 };
+use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::{DateTime, Utc};
+use openssl::{hash::MessageDigest, sign::Signer};
 use pretty_assertions::assert_eq;
+use ring::digest::{digest, SHA256};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -71,7 +76,6 @@ async fn test_note_creation(db_path: &str, content_type: &str, wrapping: bool) -
     assert_eq!(response.status(), StatusCode::CREATED);
     let location = response.headers().get("location").unwrap().to_str()?;
     assert!(location.starts_with("https://example.com/actors/john/objects/note/"));
-    //eprintln!("{location} {}", location.strip_prefix("https://example.com").unwrap());
     let response = test_app
         .app()?
         .oneshot(
@@ -300,6 +304,110 @@ async fn create_note_private() -> Result<()> {
             "published": null,
         })
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_to_federated_inbox() -> Result<()> {
+    let test_app = TestApp::new("add_to_federated_inbox")?;
+    test_app
+        .create_actor("john", "john@example.com", "password1")
+        .await?;
+    let v = test_app
+        .create_actor("jane", "jane@example.com", "password1")
+        .await?;
+    let token = v.get("token").unwrap().as_str().unwrap();
+    let activity = json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "type": "Create",
+        "to": ["https://example.com/actors/jane"],
+        "id": "https://example.com/actors/john/outbox/1F046D51-7454-4633-A40D-B6DC41F32781",
+        "published": "2023-02-10T15:04:55Z",
+        "object": {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "type": "Note",
+            "to": ["https://example.com/actors/jane"],
+            "content": "First post!"
+        },
+    });
+    let data = serde_json::to_vec(&activity)?;
+    let digest = digest(&SHA256, &data);
+    let date = chrono::Utc::now().to_rfc2822();
+    let digest = format!("sha-256={}", BASE64_STANDARD.encode(digest));
+    let to_sign = format!(
+        "(request-target): post /actors/jane/inbox\nhost: example.com\ndate: {date}\ndigest: {digest}\n"
+    );
+    let key = test_app.private_key("john")?;
+    let mut signer = Signer::new(MessageDigest::sha256(), &key)?;
+    signer.update(to_sign.as_bytes())?;
+    let signature = signer.sign_to_vec()?;
+
+    let signature = format!(
+        "keyId=\"https://example.com/actors/john#main-key\",headers=\"(request-target) host date digest\",signature=\"{}\"",
+        BASE64_STANDARD.encode(signature)
+    );
+    let response = test_app
+        .app()?
+        .oneshot(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/actors/john")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let john: Value = serde_json::from_slice(&body).unwrap();
+
+    let mut cache = HashMap::new();
+    cache.insert("https://example.com/actors/john#main-key".to_string(), john);
+    let response = test_app
+        .app_with_cache(cache)?
+        .oneshot(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/actors/jane/inbox")
+                .header(http::header::HOST, "example.com")
+                .header("digest", digest)
+                .header(http::header::DATE, date)
+                .header("signature", signature)
+                .header(
+                    http::header::CONTENT_TYPE,
+                    "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",
+                )
+                .body(Body::from(data))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = test_app
+        .app()?
+        .oneshot(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/actors/jane/inbox")
+                .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\""
+    );
+    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let mut body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(1, body.get("totalItems").unwrap().as_i64().unwrap());
+    let v = body
+        .get_mut("orderedItems")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    assert_eq!(1, v.len());
+    body = v.pop().unwrap();
+
+    assert_eq!(body, activity);
 
     Ok(())
 }

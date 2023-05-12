@@ -7,13 +7,14 @@ use axum::{
 };
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use http::Method;
-use inbox::{get_inbox, get_shared_inbox};
+use inbox::{get_inbox, get_shared_inbox, post_inbox};
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use openssl::rsa::Rsa;
 
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use ring::rand::SystemRandom;
+use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -76,6 +77,7 @@ struct AppState {
     pool: Pool<SqliteConnectionManager>,
     random: SystemRandom,
     keys: HashMap<String, Key>,
+    cache: HashMap<String, Value>,
     // encryption_key: String,
 }
 
@@ -193,7 +195,7 @@ fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<HashMap<String, Key>>
 }
 
 /// App routes.
-pub fn app(base: &str, db_path: &str) -> Result<Router> {
+pub fn app(base: &str, db_path: &str, cache: HashMap<String, Value>) -> Result<Router> {
     let manager = SqliteConnectionManager::file(db_path);
     let pool = r2d2::Pool::new(manager).unwrap();
 
@@ -204,6 +206,7 @@ pub fn app(base: &str, db_path: &str) -> Result<Router> {
         pool,
         random: SystemRandom::new(),
         keys,
+        cache,
     });
 
     let cors = CorsLayer::new()
@@ -215,7 +218,7 @@ pub fn app(base: &str, db_path: &str) -> Result<Router> {
         .route("/actors", post(create_actor))
         .route("/actors/:username", get(get_actor))
         .route("/actors/:username/outbox", post(post_outbox))
-        .route("/actors/:username/inbox", get(get_inbox))
+        .route("/actors/:username/inbox", get(get_inbox).post(post_inbox))
         .route(
             "/actors/:username/objects/:object_type/:object_id",
             get(get_object),

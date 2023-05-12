@@ -1,4 +1,4 @@
-use crate::{protocol::JsonLD, AppState};
+use crate::{protocol::JsonLD, util::get, AppState};
 use anyhow::{anyhow, Result};
 use axum::{
     extract::{Path, State},
@@ -8,7 +8,11 @@ use axum::{
 };
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 use jsonwebtoken::{decode, decode_header, encode, Algorithm, Header, Validation};
-use openssl::{error::ErrorStack, rsa::Rsa};
+use openssl::{
+    error::ErrorStack,
+    pkey::{PKey, Private, Public},
+    rsa::Rsa,
+};
 use ring::digest::{digest, SHA256};
 use ring::rand::SecureRandom;
 use rusqlite::ErrorCode;
@@ -86,6 +90,12 @@ impl From<ErrorStack> for ActorError {
 
 impl From<FromUtf8Error> for ActorError {
     fn from(value: FromUtf8Error) -> Self {
+        ActorError::Internal(anyhow!(value))
+    }
+}
+
+impl From<serde_json::Error> for ActorError {
+    fn from(value: serde_json::Error) -> Self {
         ActorError::Internal(anyhow!(value))
     }
 }
@@ -297,8 +307,45 @@ pub(crate) fn actor_id(state: &AppState, username: &str) -> String {
 
 pub(crate) fn extract_username(state: &AppState, web_id: &str) -> Option<String> {
     let base = format!("https://{}/actors/", state.base);
-    match web_id.strip_prefix(&base) {
-        Some(username) => Some(username.into()),
-        None => None,
+    web_id.strip_prefix(&base).map(|username| username.into())
+}
+
+pub(crate) struct PrivateKey {
+    pub(crate) id: String,
+    pub(crate) key: PKey<Private>,
+}
+
+impl PrivateKey {
+    fn new(state: &AppState, username: &str, key: Rsa<Private>) -> Result<PrivateKey> {
+        Ok(PrivateKey {
+            id: format!("https://{}/actors/{username}#main-key", state.base),
+            key: PKey::from_rsa(key)?,
+        })
     }
+}
+
+pub(crate) fn private_key(state: &AppState, username: &str) -> Result<PrivateKey, ActorError> {
+    let conn = &state.conn()?;
+    match conn.query_row(
+        "SELECT private_key FROM Actors where username=?1",
+        [&username],
+        |row| row.get::<usize, String>(0),
+    ) {
+        Ok(data) => Ok(PrivateKey::new(
+            state,
+            username,
+            Rsa::private_key_from_pem(data.as_bytes())?,
+        )?),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(ActorError::UnknownActor(username.to_string()))
+        }
+
+        Err(err) => Err(ActorError::Internal(anyhow!(err))),
+    }
+}
+
+pub(crate) async fn public_key(state: &AppState, key_id: &str) -> Result<PKey<Public>, ActorError> {
+    let key: PublicKey = serde_json::from_value(get(state, key_id, Some("/publicKey")).await?)?;
+    let pkey = PKey::from_rsa(Rsa::public_key_from_pem(key.public_key_pem.as_bytes())?)?;
+    Ok(pkey)
 }

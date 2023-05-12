@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json, TypedHeader,
 };
+
 use chrono::{TimeZone, Utc};
 use rusqlite::ErrorCode;
 use serde_json::{json, Value};
@@ -18,11 +19,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    actor::{actor_id, extract_username, validate},
+    actor::{actor_id, extract_username, private_key, validate},
     inbox::{add_inbox, add_shared_inbox},
     object::create_object,
     protocol::{clean, recipients, Created, JsonLD, ACTIVITIES, ACTIVITY_STREAMS_NS, PUBLIC},
-    util::copy,
+    util::{copy, post},
     AppState,
 };
 
@@ -111,42 +112,39 @@ pub(crate) async fn post_outbox(
         );
         new_activity = wrap_activity;
     }
-    add(
-        &mut new_activity,
-        "id",
-        format!(
-            "https://{}/actors/{username}/activities/{short_id}",
-            state.base
-        ),
-    )?;
-    let iat = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let activity_id = format!("https://{}/actors/{username}/outbox/{short_id}", state.base);
+    add(&mut new_activity, "id", activity_id.clone())?;
+    let iat = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
     let activity_state =
         preprocess_activity(&state, &username, &mut new_activity, &activity_type, iat)?;
 
-    let conn = &state.conn()?;
-    match conn.execute(
-        "INSERT INTO Outbox VALUES (?1, ?2, ?3, ?4, ?5)",
-        (&username, &short_id, &activity_type, iat, &new_activity),
-    ) {
-        Ok(_) => {}
-        Err(rusqlite::Error::SqliteFailure(err, msg))
-            if err.code == ErrorCode::ConstraintViolation
-                && matches!(&msg,Some(msg) if msg.contains("UNIQUE") && msg.contains("Outbox")) =>
-        {
-            return Err(OutboxError::Duplicate(short_id.to_string()))
-        }
-        Err(err) => {
-            return Err(OutboxError::Internal(anyhow!(err)));
+    {
+        let conn = &state.conn()?;
+        match conn.execute(
+            "INSERT INTO Outbox VALUES (?1, ?2, ?3, ?4, ?5)",
+            (&username, &short_id, &activity_type, iat, &new_activity),
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(err, msg))
+                if err.code == ErrorCode::ConstraintViolation
+                    && matches!(&msg,Some(msg) if msg.contains("UNIQUE") && msg.contains("Outbox")) =>
+            {
+                return Err(OutboxError::Duplicate(short_id.to_string()))
+            }
+            Err(err) => {
+                return Err(OutboxError::Internal(anyhow!(err)));
+            }
         }
     }
     postprocess_activity(
         &state,
         &username,
-        &short_id,
+        &activity_id,
         &mut new_activity,
         &activity_state,
         iat,
-    )?;
+    )
+    .await?;
 
     Ok(Created::new(activity_state.location()))
 }
@@ -156,9 +154,9 @@ fn preprocess_activity(
     username: &str,
     activity: &mut Value,
     activity_type: &str,
-    iat: u64,
+    iat: i64,
 ) -> Result<ActivityState, OutboxError> {
-    let ts = Utc.timestamp_opt(iat as i64, 0).unwrap().to_rfc3339();
+    let ts = Utc.timestamp_opt(iat, 0).unwrap().to_rfc3339();
     let actor = format!("https://{}/actors/{username}", state.base);
     add(activity, "published", ts.clone())?;
     add(activity, "actor", actor.clone())?;
@@ -205,13 +203,13 @@ fn preprocess_activity(
     Ok(ActivityState::Other)
 }
 
-fn postprocess_activity(
+async fn postprocess_activity(
     state: &AppState,
     username: &str,
-    short_id: &Uuid,
+    activity_id: &str,
     activity: &mut Value,
     activity_state: &ActivityState,
-    iat: u64,
+    iat: i64,
 ) -> Result<()> {
     match activity_state {
         ActivityState::Create {
@@ -229,16 +227,17 @@ fn postprocess_activity(
                 iat,
             )?;
             let actor_id = actor_id(state, username);
+            let key = private_key(state, username)?;
             for recipient in recipients.iter() {
                 if recipient == PUBLIC {
-                    add_shared_inbox(state, short_id, "Create", activity, iat)?;
+                    add_shared_inbox(state, activity_id, "Create", activity, iat)?;
                 } else if recipient != &actor_id {
                     match extract_username(state, recipient) {
                         Some(rec_username) => {
-                            add_inbox(state, &rec_username, short_id, "Create", activity, iat)?;
+                            add_inbox(state, &rec_username, activity_id, "Create", activity, iat)?;
                         }
                         None => {
-                            unimplemented!("add to federated inbox")
+                            post(state, recipient, &key, activity).await?;
                         }
                     }
                 }

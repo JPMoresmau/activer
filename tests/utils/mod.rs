@@ -1,12 +1,14 @@
 mod tokens;
 
-use std::path::Path;
+use std::{path::Path, collections::HashMap};
 
 use activer::app;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use axum::Router;
 use http::{Request, StatusCode};
 use hyper::Body;
+use openssl::{rsa::Rsa, pkey::{Private, PKey}};
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -16,6 +18,7 @@ pub struct TestApp<'a> {
     pub db_path: &'a str,
 }
 
+#[allow(dead_code)]
 impl<'a> TestApp<'a> {
     pub fn new(db_path: &'a str) -> Result<Self> {
         if Path::new(db_path).exists() {
@@ -25,9 +28,15 @@ impl<'a> TestApp<'a> {
     }
 
     pub fn app(&self) -> Result<Router> {
-        let test_app = app("example.com", self.db_path)?;
+        let test_app = app("example.com", self.db_path, HashMap::new())?;
         Ok(test_app)
     }
+
+    pub fn app_with_cache(&self, cache: HashMap<String, Value>) -> Result<Router> {
+        let test_app = app("example.com", self.db_path, cache)?;
+        Ok(test_app)
+    }
+
 
     pub fn check_token(&self, web_id: &str, token: &str) -> Result<()> {
         check_token(self.db_path, web_id, token)
@@ -63,6 +72,18 @@ impl<'a> TestApp<'a> {
         let token = body.get("token").unwrap().as_str().unwrap();
         self.check_token(&web_id, token)?;
         Ok(body)
+    }
+
+    pub fn private_key(&self, username: &str)-> Result<PKey<Private>> {
+        let conn = Connection::open(self.db_path)?;
+        match conn.query_row(
+            "SELECT private_key FROM Actors where username=?1",
+            [&username],
+            |row| row.get::<usize, String>(0),
+        ) {
+            Ok(data) => Ok(PKey::from_rsa(Rsa::private_key_from_pem(data.as_bytes())?)?),
+            Err(err) => Err(anyhow!(err)),
+        }
     }
 }
 
