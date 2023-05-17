@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 use axum::{
     body::Body,
@@ -352,21 +350,6 @@ async fn add_to_federated_inbox() -> Result<()> {
     );
     let response = test_app
         .app()?
-        .oneshot(
-            Request::builder()
-                .method(http::Method::GET)
-                .uri("/actors/john")
-                .body(Body::empty())?,
-        )
-        .await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-    let john: Value = serde_json::from_slice(&body).unwrap();
-
-    let mut cache = HashMap::new();
-    cache.insert("https://example.com/actors/john#main-key".to_string(), john);
-    let response = test_app
-        .app_with_cache(cache)?
         .oneshot(
             Request::builder()
                 .method(http::Method::POST)

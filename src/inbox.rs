@@ -1,8 +1,8 @@
 use crate::{
-    actor::validate,
-    protocol::JsonLD,
-    util::{verify, OrderedCollection, Pagination},
-    AppState,
+    actor::{validate, actor_id},
+    protocol::{JsonLD, ACTIVITY_STREAMS_NS},
+    util::{verify, OrderedCollection, Pagination, value_from_row, trigger_send_to_recipient},
+    AppState, follow::{accept_following, reject_following, add_follower},
 };
 use anyhow::{anyhow, Result};
 use axum::{
@@ -15,16 +15,17 @@ use axum::{
 use chrono::{DateTime, ParseError};
 use http::HeaderMap;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use uuid::Uuid;
+use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub(crate) enum InboxError {
     #[error("internal inbox error: {0}")]
     Internal(#[from] anyhow::Error),
-    #[error("outbox operation required authentication: {0}")]
+    #[error("inbox operation required authentication: {0}")]
     NoAuth(anyhow::Error),
-    #[error("outbox operation not authorized: {0}")]
+    #[error("inbox operation not authorized: {0}")]
     AuthFailed(anyhow::Error),
 }
 
@@ -159,24 +160,14 @@ pub(crate) async fn post_inbox(
     let published = DateTime::parse_from_rfc3339(published)?;
     let iat = published.timestamp();
     add_inbox(
-        &state,
+        state,
         &username,
         activity_id,
         activity_type,
-        &new_activity,
+        Arc::new(new_activity.clone()),
         iat,
-    )?;
+    ).await?;
     Ok(StatusCode::ACCEPTED)
-}
-
-pub fn value_from_row<E>(row: rusqlite::Result<Value, E>) -> Result<Value>
-where
-    E: Into<anyhow::Error>,
-{
-    match row {
-        Ok(value) => Ok(value),
-        Err(err) => Err(anyhow!(err)),
-    }
 }
 
 pub(crate) fn add_shared_inbox(
@@ -199,24 +190,91 @@ pub(crate) fn add_shared_inbox(
     Ok(())
 }
 
-pub(crate) fn add_inbox(
-    state: &AppState,
+pub(crate) async fn add_inbox(
+    state: Arc<AppState>,
     username: &str,
     id: &str,
     activity_type: &str,
-    data: &Value,
+    data: Arc<Value>,
     iat: i64,
 ) -> Result<(), InboxError> {
-    let conn = &state.conn()?;
-    conn.execute(
-        "INSERT OR IGNORE INTO Inbox (username, id, activity_type, created, data) VALUES (?1, ?2, ?3, ?4, ?5)",
-        (
-            username,
-            id,
-            &activity_type.to_lowercase(),
-            iat,
-            data,
-        ),
-    )?;
+    {
+        let conn = &state.conn()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO Inbox (username, id, activity_type, created, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                username,
+                id,
+                &activity_type.to_lowercase(),
+                iat,
+                &data,
+            ),
+        )?;
+    }
+    postprocess_inbox(state, username, activity_type, data).await?;
     Ok(())
+}
+
+async fn postprocess_inbox( 
+    state: Arc<AppState>,
+    username: &str,
+    activity_type: &str,
+    activity: Arc<Value>) -> Result<()>{
+    if activity_type == "Follow" {
+        let from = match activity.pointer("/actor").and_then(Value::as_str){
+            Some(from) => from,
+            None => return Err(anyhow!("no actor in activity")),
+        };
+        let v:Value = Value::clone(&activity);
+        let short_id = Uuid::new_v4();
+        let activity_id = format!("https://{}/actors/{username}/inbox/{short_id}", state.base);
+        let iat = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+
+        let response = json!({
+            "context": ACTIVITY_STREAMS_NS,
+            "id": activity_id,
+            "actor": actor_id(&state, username),
+            "type": "Accept",
+            "to": from,
+            "object": v,
+        });
+        add_follower(&state, username, from, iat)?;
+
+        trigger_send_to_recipient(state, username, from.to_owned(), Arc::new(activity_id), Arc::new(response), iat).await?;
+
+    } else if activity_type == "Accept"{
+        let following = follow_object(activity_type, &activity)?;
+        accept_following(&state, username, &following)?;  
+    } else if activity_type == "Reject"{
+        let following = follow_object(activity_type, &activity)?;
+        reject_following(&state, username, &following)?;
+        
+    }
+    Ok(())
+}
+
+fn follow_object(activity_type: &str,activity: &Value) -> Result<String,>{
+    match activity.pointer("/object/type").and_then(|v| v.as_str()) {
+        Some(activity) => {
+            if activity != "Follow" {
+                return Err(anyhow!(
+                    "no Follow found in {activity_type}",
+                ));
+            }
+        },
+        None => {
+            return Err(anyhow!(
+                "no `/object/type` found in {activity_type} activity",
+            ));
+        }
+    };
+    let following = match activity.pointer("/object/object").and_then(|v| v.as_str()) {
+        Some(activity) => activity.to_string(),
+        None => {
+            return Err(anyhow!(
+                "no `/object/object` string found in {activity_type} activity",
+            ));
+        }
+    };
+    Ok(following)
 }

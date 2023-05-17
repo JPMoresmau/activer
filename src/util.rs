@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
+use futures::{future::BoxFuture, FutureExt};
 use http::HeaderMap;
 use openssl::{
     hash::MessageDigest,
@@ -14,7 +15,9 @@ use serde_json::Value;
 use url::Url;
 
 use crate::{
-    actor::{public_key, PrivateKey},
+    actor::{actor_id, extract_username, private_key, public_key, PrivateKey},
+    inbox::{add_inbox, add_shared_inbox},
+    protocol::PUBLIC,
     AppState,
 };
 
@@ -170,4 +173,80 @@ fn parse_map(value: &str) -> HashMap<&str, &str> {
 
 fn unquote(value: &str) -> &str {
     value.trim_matches('"')
+}
+
+pub fn value_from_row<E>(row: rusqlite::Result<Value, E>) -> Result<Value>
+where
+    E: Into<anyhow::Error>,
+{
+    match row {
+        Ok(value) => Ok(value),
+        Err(err) => Err(anyhow!(err)),
+    }
+}
+
+pub fn string_from_row<E>(row: rusqlite::Result<String, E>) -> Result<String>
+where
+    E: Into<anyhow::Error>,
+{
+    match row {
+        Ok(value) => Ok(value),
+        Err(err) => Err(anyhow!(err)),
+    }
+}
+
+pub(crate) async fn trigger_send_to_recipient(
+    state: Arc<AppState>,
+    username: &str,
+    recipient: String,
+    activity_id: Arc<String>,
+    activity: Arc<Value>,
+    iat: i64,
+) -> Result<()> {
+    let actor_id = Arc::new(actor_id(&state, username));
+    let key = Arc::new(private_key(&state, username)?);
+    tokio::spawn({
+        let aid = activity_id.clone();
+        async move {
+            match send_to_recipient(state, recipient.clone(), actor_id, key, aid, activity, iat)
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("Sent activity {activity_id} to {recipient}")
+                }
+                Err(err) => {
+                    tracing::error!("Sending activity {activity_id} to {recipient} failed: {err}")
+                }
+            };
+        }
+    });
+
+    Ok(())
+}
+
+pub(crate) fn send_to_recipient(
+    state: Arc<AppState>,
+    recipient: String,
+    actor_id: Arc<String>,
+    key: Arc<PrivateKey>,
+    activity_id: Arc<String>,
+    activity: Arc<Value>,
+    iat: i64,
+) -> BoxFuture<'static, Result<()>> {
+    async move {
+        if recipient == PUBLIC {
+            add_shared_inbox(&state, &activity_id, "Create", &activity, iat)?;
+        } else if recipient != *actor_id {
+            match extract_username(&state, &recipient) {
+                Some(rec_username) => {
+                    add_inbox(state, &rec_username, &activity_id, "Create", activity, iat).await?;
+                }
+                None => {
+                    post(&state, &recipient, &key, &activity).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+    .boxed()
 }

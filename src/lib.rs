@@ -6,6 +6,7 @@ use axum::{
     Router,
 };
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
+use follow::{get_followers, get_following};
 use http::Method;
 use inbox::{get_inbox, get_shared_inbox, post_inbox};
 use jsonwebtoken::{DecodingKey, EncodingKey};
@@ -27,6 +28,7 @@ use webfinger::resource;
 mod actor;
 pub use actor::Claims;
 use actor::{create_actor, get_actor, login};
+mod follow;
 mod inbox;
 mod outbox;
 use outbox::post_outbox;
@@ -117,44 +119,61 @@ fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<HashMap<String, Key>>
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Outbox (
-            username      TEXT REFERENCES Actors (username),
-            id            TEXT,
-            activity_type TEXT,
-            created       INTEGER,
-            data          TEXT,
+            username      TEXT NOT NULL REFERENCES Actors (username),
+            id            TEXT NOT NULL,
+            activity_type TEXT NOT NULL,
+            created       INTEGER NOT NULL,
+            data          TEXT NOT NULL,
             PRIMARY KEY  (username, id)
     )",
         (),
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Objects (
-            username      TEXT REFERENCES Actors (username),
-            id            TEXT,
-            object_type   TEXT,
-            created       INTEGER,
-            data          TEXT,
+            username      TEXT NOT NULL REFERENCES Actors (username),
+            id            TEXT NOT NULL,
+            object_type   TEXT NOT NULL,
+            created       INTEGER NOT NULL,
+            data          TEXT NOT NULL,
             PRIMARY KEY   (username, id)
     )",
         (),
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Inbox (
-            username      TEXT REFERENCES Actors (username),
-            id            TEXT,
-            activity_type TEXT,
-            created       INTEGER,
-            data          TEXT,
+            username      TEXT NOT NULL REFERENCES Actors (username),
+            id            TEXT NOT NULL,
+            activity_type TEXT NOT NULL,
+            created       INTEGER NOT NULL,
+            data          TEXT NOT NULL,
             PRIMARY KEY   (username, id)
     )",
         (),
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS SharedInbox (
-            id            TEXT PRIMARY KEY,
-            activity_type TEXT,
-            created       INTEGER,
-            data          TEXT
+            id            TEXT NOT NULL PRIMARY KEY,
+            activity_type TEXT NOT NULL,
+            created       INTEGER NOT NULL,
+            data          TEXT NOT NULL
     )",
+        (),
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Followers (
+            username      TEXT NOT NULL REFERENCES Actors (username),
+            follower      TEXT NOT NULL,
+            created       INTEGER  NOT NULL
+    )",
+        (),
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Following (
+            username      TEXT NOT NULL REFERENCES Actors (username),
+            following     TEXT NOT NULL,
+            created       INTEGER NOT NULL,
+            accepted      INTEGER NOT NULL DEFAULT 0 -- 0 pending, 1 accepted, -1 rejected
+    )", 
         (),
     )?;
 
@@ -223,6 +242,8 @@ where
         .route("/actors/:username", get(get_actor))
         .route("/actors/:username/outbox", post(post_outbox))
         .route("/actors/:username/inbox", get(get_inbox).post(post_inbox))
+        .route("/actors/:username/followers", get(get_followers))
+        .route("/actors/:username/following", get(get_following))
         .route(
             "/actors/:username/objects/:object_type/:object_id",
             get(get_object),

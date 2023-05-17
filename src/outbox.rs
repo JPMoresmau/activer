@@ -19,11 +19,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    actor::{actor_id, extract_username, private_key, validate, PrivateKey},
-    inbox::{add_inbox, add_shared_inbox},
+    actor::{actor_id, private_key, validate},
+    follow::{accept_following, add_following, reject_following},
     object::create_object,
-    protocol::{clean, recipients, Created, JsonLD, ACTIVITIES, ACTIVITY_STREAMS_NS, PUBLIC},
-    util::{copy, post},
+    protocol::{clean, recipients, Created, JsonLD, ACTIVITIES, ACTIVITY_STREAMS_NS},
+    util::{copy, send_to_recipient, trigger_send_to_recipient},
     AppState,
 };
 
@@ -185,7 +185,7 @@ fn preprocess_activity(
             }
             None => {
                 return Err(OutboxError::Invalid(String::from(
-                    "no `/object` JSON object found in activity",
+                    "no `/object` JSON object found in Create activity",
                 )))
             }
         };
@@ -194,14 +194,73 @@ fn preprocess_activity(
             .map(|s| s.to_string())
             .collect();
         clean(activity);
-        return Ok(ActivityState::Create {
+        Ok(ActivityState::Create {
             object_type,
             object_short_id,
             object_id,
             recipients,
-        });
+        })
+    } else if activity_type == "Follow" {
+        let following = match activity.pointer("/object").and_then(|v| v.as_str()) {
+            Some(activity) => activity.to_string(),
+            None => {
+                return Err(OutboxError::Invalid(String::from(
+                    "no `/object` string found in Follow activity",
+                )));
+            }
+        };
+        Ok(ActivityState::FollowRequest { following })
+    } else if activity_type == "Accept" {
+        match activity.pointer("/object/type").and_then(|v| v.as_str()) {
+            Some(activity) => {
+                if activity != "Follow" {
+                    return Err(OutboxError::Invalid(String::from(
+                        "no Follow found in Accept",
+                    )));
+                }
+            }
+            None => {
+                return Err(OutboxError::Invalid(String::from(
+                    "no `/object/type` found in Accept activity",
+                )));
+            }
+        };
+        let following = match activity.pointer("/object/object").and_then(|v| v.as_str()) {
+            Some(activity) => activity.to_string(),
+            None => {
+                return Err(OutboxError::Invalid(String::from(
+                    "no `/object/object` string found in Accept activity",
+                )));
+            }
+        };
+        Ok(ActivityState::FollowAccept { following })
+    } else if activity_type == "Reject" {
+        match activity.pointer("/object/type").and_then(|v| v.as_str()) {
+            Some(activity) => {
+                if activity != "Follow" {
+                    return Err(OutboxError::Invalid(String::from(
+                        "no Follow found in Reject",
+                    )));
+                }
+            }
+            None => {
+                return Err(OutboxError::Invalid(String::from(
+                    "no `/object/type` found in Reject activity",
+                )));
+            }
+        };
+        let following = match activity.pointer("/object/object").and_then(|v| v.as_str()) {
+            Some(activity) => activity.to_string(),
+            None => {
+                return Err(OutboxError::Invalid(String::from(
+                    "no `/object/object` string found in Reject activity",
+                )));
+            }
+        };
+        Ok(ActivityState::FollowReject { following })
+    } else {
+        Ok(ActivityState::Other)
     }
-    Ok(ActivityState::Other)
 }
 
 async fn postprocess_activity(
@@ -236,56 +295,45 @@ async fn postprocess_activity(
                     let st = state.clone();
                     let actor_id = actor_id.clone();
                     let key = key.clone();
-                    let activity_id = activity_id.clone();
+                    let aid = Arc::clone(&activity_id);
+                    let aid2 = Arc::clone(&activity_id);
                     let activity = activity.clone();
                     async move {
                         match send_to_recipient(
                             st,
-                            &recipient,
-                            &actor_id,
-                            &key,
-                            &activity_id,
-                            &activity,
+                            recipient.clone(),
+                            actor_id,
+                            key,
+                            aid,
+                            activity,
                             iat,
                         )
                         .await
                         {
                             Ok(_) => {
-                                tracing::info!("Sent activity {activity_id} to {recipient}")
+                                tracing::info!("Sent activity {aid2} to {recipient}")
                             }
                             Err(err) => tracing::error!(
-                                "Sending activity {activity_id} to {recipient} failed: {err}"
+                                "Sending activity {aid2} to {recipient} failed: {err}"
                             ),
                         };
                     }
                 });
             }
         }
-        _ => {}
-    }
-    Ok(())
-}
-
-async fn send_to_recipient(
-    state: Arc<AppState>,
-    recipient: &str,
-    actor_id: &str,
-    key: &PrivateKey,
-    activity_id: &str,
-    activity: &Value,
-    iat: i64,
-) -> Result<()> {
-    if recipient == PUBLIC {
-        add_shared_inbox(&state, activity_id, "Create", activity, iat)?;
-    } else if recipient != actor_id {
-        match extract_username(&state, recipient) {
-            Some(rec_username) => {
-                add_inbox(&state, &rec_username, activity_id, "Create", activity, iat)?;
-            }
-            None => {
-                post(&state, recipient, key, activity).await?;
-            }
+        ActivityState::Create { .. } => return Err(anyhow!("Create activity with no object")),
+        ActivityState::FollowRequest { following } => {
+            add_following(&state, username, &following, iat)?;
+            trigger_send_to_recipient(state, username, following, activity_id, activity, iat)
+                .await?;
         }
+        ActivityState::FollowAccept { following } => {
+            accept_following(&state, username, &following)?;
+        }
+        ActivityState::FollowReject { following } => {
+            reject_following(&state, username, &following)?;
+        }
+        ActivityState::Other => {}
     }
     Ok(())
 }
@@ -298,6 +346,15 @@ pub enum ActivityState {
         object_id: String,
         recipients: HashSet<String>,
     },
+    FollowRequest {
+        following: String,
+    },
+    FollowAccept {
+        following: String,
+    },
+    FollowReject {
+        following: String,
+    },
 }
 
 impl ActivityState {
@@ -305,6 +362,9 @@ impl ActivityState {
         match self {
             ActivityState::Create { object_id, .. } => Some(object_id),
             ActivityState::Other => None,
+            ActivityState::FollowRequest { .. } => None,
+            ActivityState::FollowAccept { .. } => None,
+            ActivityState::FollowReject { .. } => None,
         }
     }
 }

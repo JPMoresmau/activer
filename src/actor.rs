@@ -1,4 +1,8 @@
-use crate::{protocol::JsonLD, util::get, AppState};
+use crate::{
+    protocol::{JsonLD, ACTIVITY_STREAMS_NS},
+    util::get,
+    AppState,
+};
 use anyhow::{anyhow, Result};
 use axum::{
     extract::{Path, State},
@@ -218,7 +222,7 @@ impl Actor {
     fn new(username: String, base: &str, public_key_pem: String) -> Self {
         Actor {
             context: vec![
-                "https://www.w3.org/ns/activitystreams".into(),
+                ACTIVITY_STREAMS_NS.into(),
                 "https://w3id.org/security/v1".into(),
             ],
             id: format!("https://{base}/actors/{username}"),
@@ -307,7 +311,9 @@ pub(crate) fn actor_id(state: &AppState, username: &str) -> String {
 
 pub(crate) fn extract_username(state: &AppState, web_id: &str) -> Option<String> {
     let base = format!("https://{}/actors/", state.base);
-    web_id.strip_prefix(&base).map(|username| username.into())
+    web_id
+        .strip_prefix(&base)
+        .map(|username| username.trim_end_matches("#main-key").into())
 }
 
 #[derive(Clone)]
@@ -346,7 +352,27 @@ pub(crate) fn private_key(state: &AppState, username: &str) -> Result<PrivateKey
 }
 
 pub(crate) async fn public_key(state: &AppState, key_id: &str) -> Result<PKey<Public>, ActorError> {
-    let key: PublicKey = serde_json::from_value(get(state, key_id, Some("/publicKey")).await?)?;
-    let pkey = PKey::from_rsa(Rsa::public_key_from_pem(key.public_key_pem.as_bytes())?)?;
+    let key: Vec<u8> = match extract_username(state, key_id) {
+        Some(username) => {
+            let conn = &state.conn()?;
+            match conn.query_row(
+                "SELECT public_key FROM Actors where username=?1",
+                [&username],
+                |row| row.get::<usize, String>(0),
+            ) {
+                Ok(public_key_pem) => public_key_pem.into_bytes(),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(ActorError::UnknownActor(username))
+                }
+                Err(err) => return Err(ActorError::Internal(anyhow!(err))),
+            }
+        }
+        None => {
+            let key: PublicKey =
+                serde_json::from_value(get(state, key_id, Some("/publicKey")).await?)?;
+            key.public_key_pem.into_bytes()
+        }
+    };
+    let pkey = PKey::from_rsa(Rsa::public_key_from_pem(&key)?)?;
     Ok(pkey)
 }
