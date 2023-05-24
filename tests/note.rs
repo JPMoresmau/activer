@@ -16,7 +16,6 @@ use utils::TestApp;
 
 #[tokio::test]
 async fn create_note() -> Result<()> {
-    tracing_subscriber::fmt::init();
     test_note_creation(
         "create_note.db",
         "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",

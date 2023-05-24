@@ -46,24 +46,7 @@ async fn create_actor_and_login() -> Result<()> {
     let token = body.get("token").unwrap().as_str().unwrap();
     test_app.check_token("https://example.com/actors/john", token)?;
 
-    let response = test_app
-        .app()?
-        .oneshot(
-            Request::builder()
-                .method(http::Method::GET)
-                .uri("/actors/john")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\""
-    );
-    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-    let mut body: Value = serde_json::from_slice(&body).unwrap();
+    let mut body = test_app.get_actor("john").await?;
     let key = body.pointer_mut("/publicKey/publicKeyPem").unwrap().take();
     assert!(key
         .as_str()

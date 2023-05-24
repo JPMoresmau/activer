@@ -234,12 +234,26 @@ pub(crate) fn send_to_recipient(
     iat: i64,
 ) -> BoxFuture<'static, Result<()>> {
     async move {
+        let ac = Arc::clone(&activity);
+        let activity_type = ac
+            .get("type")
+            .ok_or_else(|| anyhow!("no activity type"))?
+            .as_str()
+            .ok_or_else(|| anyhow!("activity type not a string"))?;
         if recipient == PUBLIC {
-            add_shared_inbox(&state, &activity_id, "Create", &activity, iat)?;
+            add_shared_inbox(&state, &activity_id, activity_type, &activity, iat)?;
         } else if recipient != *actor_id {
             match extract_username(&state, &recipient) {
                 Some(rec_username) => {
-                    add_inbox(state, &rec_username, &activity_id, "Create", activity, iat).await?;
+                    add_inbox(
+                        state,
+                        &rec_username,
+                        &activity_id,
+                        activity_type,
+                        activity,
+                        iat,
+                    )
+                    .await?;
                 }
                 None => {
                     post(&state, &recipient, &key, &activity).await?;

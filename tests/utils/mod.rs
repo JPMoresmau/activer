@@ -1,13 +1,16 @@
 mod tokens;
 
-use std::{path::Path, collections::HashMap};
+use std::{collections::HashMap, path::Path};
 
 use activer::app;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use axum::Router;
 use http::{Request, StatusCode};
 use hyper::Body;
-use openssl::{rsa::Rsa, pkey::{Private, PKey}};
+use openssl::{
+    pkey::{PKey, Private},
+    rsa::Rsa,
+};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -36,7 +39,6 @@ impl<'a> TestApp<'a> {
         let test_app = app("example.com", self.db_path, cache)?;
         Ok(test_app)
     }
-
 
     pub fn check_token(&self, web_id: &str, token: &str) -> Result<()> {
         check_token(self.db_path, web_id, token)
@@ -74,7 +76,7 @@ impl<'a> TestApp<'a> {
         Ok(body)
     }
 
-    pub fn private_key(&self, username: &str)-> Result<PKey<Private>> {
+    pub fn private_key(&self, username: &str) -> Result<PKey<Private>> {
         let conn = Connection::open(self.db_path)?;
         match conn.query_row(
             "SELECT private_key FROM Actors where username=?1",
@@ -84,6 +86,27 @@ impl<'a> TestApp<'a> {
             Ok(data) => Ok(PKey::from_rsa(Rsa::private_key_from_pem(data.as_bytes())?)?),
             Err(err) => Err(anyhow!(err)),
         }
+    }
+
+    pub async fn get_actor(&self, username: &str) -> Result<Value> {
+        let response = self
+            .app()?
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(format!("/actors/{username}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\""
+        );
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        Ok(serde_json::from_slice(&body).unwrap())
     }
 }
 

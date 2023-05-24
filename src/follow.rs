@@ -57,7 +57,7 @@ pub(crate) async fn get_followers(
     let ordered_ids: Result<Vec<String>> = {
         let conn = &state.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT follower FROM Followers WHERE username=?1 ORDER BY created DESC, id ASC LIMIT 25 OFFSET (?2 * 25) ",
+            "SELECT follower FROM Followers WHERE username=?1 ORDER BY created DESC, follower ASC LIMIT 25 OFFSET (?2 * 25) ",
         )?;
 
         let rs = stmt
@@ -81,7 +81,7 @@ pub(crate) async fn get_following(
     let ordered_ids: Result<Vec<String>> = {
         let conn = &state.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT following FROM Following WHERE username=?1 AND accepted=1 ORDER BY created DESC, id ASC LIMIT 25 OFFSET (?2 * 25) ",
+            "SELECT following FROM Following WHERE username=?1 AND accepted=1 ORDER BY created DESC, following ASC LIMIT 25 OFFSET (?2 * 25) ",
         )?;
 
         let rs = stmt
@@ -131,7 +131,7 @@ pub(crate) fn add_follower(
 ) -> Result<(), FollowError> {
     let conn = &state.conn()?;
     conn.execute(
-        "INSERT OR IGNORE INTO Followers (username, id, created) VALUES (?1, ?2, ?3)",
+        "INSERT OR IGNORE INTO Followers (username, follower, created) VALUES (?1, ?2, ?3)",
         (username, id, iat),
     )?;
     Ok(())
@@ -140,7 +140,7 @@ pub(crate) fn add_follower(
 pub(crate) fn add_following(state: &AppState, username: &str, id: &str, iat: i64) -> Result<()> {
     let conn = &state.conn()?;
     conn.execute(
-        "INSERT OR IGNORE INTO Following (username, id, created) VALUES (?1, ?2, ?3)",
+        "INSERT OR IGNORE INTO Following (username, following, created) VALUES (?1, ?2, ?3)",
         (username, id, iat),
     )?;
     Ok(())
@@ -149,7 +149,7 @@ pub(crate) fn add_following(state: &AppState, username: &str, id: &str, iat: i64
 pub(crate) fn accept_following(state: &AppState, username: &str, id: &str) -> Result<()> {
     let conn = &state.conn()?;
     conn.execute(
-        "UPDATE Following SET accepted=1 WHERE username=?1 AND id = ?2",
+        "UPDATE Following SET accepted=1 WHERE username=?1 AND following = ?2",
         (username, id),
     )?;
     Ok(())
@@ -158,7 +158,7 @@ pub(crate) fn accept_following(state: &AppState, username: &str, id: &str) -> Re
 pub(crate) fn reject_following(state: &AppState, username: &str, id: &str) -> Result<()> {
     let conn = &state.conn()?;
     conn.execute(
-        "UPDATE Following SET accepted=-1 WHERE username=?1 AND id = ?2",
+        "UPDATE Following SET accepted=-1 WHERE username=?1 AND following = ?2",
         (username, id),
     )?;
     Ok(())
