@@ -1,8 +1,9 @@
 use crate::{
-    actor::{validate, actor_id},
-    protocol::{JsonLD, ACTIVITY_STREAMS_NS},
-    util::{verify, OrderedCollection, Pagination, value_from_row, trigger_send_to_recipient},
-    AppState, follow::{accept_following, reject_following, add_follower},
+    actor::{actor_id, validate},
+    follow::{accept_following, add_follower, reject_following, remove_follower},
+    protocol::{object_object, object_type, JsonLD, ACTIVITY_STREAMS_NS},
+    util::{trigger_send_to_recipient, value_from_row, verify, OrderedCollection, Pagination},
+    AppState,
 };
 use anyhow::{anyhow, Result};
 use axum::{
@@ -15,9 +16,12 @@ use axum::{
 use chrono::{DateTime, ParseError};
 use http::HeaderMap;
 use serde_json::{json, Value};
-use uuid::Uuid;
-use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Error, Debug)]
 pub(crate) enum InboxError {
@@ -166,7 +170,8 @@ pub(crate) async fn post_inbox(
         activity_type,
         Arc::new(new_activity.clone()),
         iat,
-    ).await?;
+    )
+    .await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -215,17 +220,18 @@ pub(crate) async fn add_inbox(
     Ok(())
 }
 
-async fn postprocess_inbox( 
+async fn postprocess_inbox(
     state: Arc<AppState>,
     username: &str,
     activity_type: &str,
-    activity: Arc<Value>) -> Result<()>{
+    activity: Arc<Value>,
+) -> Result<()> {
     if activity_type == "Follow" {
-        let from = match activity.pointer("/actor").and_then(Value::as_str){
+        let from = match activity.pointer("/actor").and_then(Value::as_str) {
             Some(from) => from,
             None => return Err(anyhow!("no actor in activity")),
         };
-        let v:Value = Value::clone(&activity);
+        let v: Value = Value::clone(&activity);
         let short_id = Uuid::new_v4();
         let activity_id = format!("https://{}/actors/{username}/inbox/{short_id}", state.base);
         let iat = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
@@ -240,41 +246,34 @@ async fn postprocess_inbox(
         });
         add_follower(&state, username, from, iat)?;
 
-        trigger_send_to_recipient(state, username, from.to_owned(), Arc::new(activity_id), Arc::new(response), iat).await?;
-
-    } else if activity_type == "Accept"{
+        trigger_send_to_recipient(
+            state,
+            username,
+            from.to_owned(),
+            Arc::new(activity_id),
+            Arc::new(response),
+            iat,
+        )
+        .await?;
+    } else if activity_type == "Accept" {
         let following = follow_object(activity_type, &activity)?;
-        accept_following(&state, username, &following)?;  
-    } else if activity_type == "Reject"{
+        accept_following(&state, username, following)?;
+    } else if activity_type == "Reject" {
         let following = follow_object(activity_type, &activity)?;
-        reject_following(&state, username, &following)?;
-        
+        reject_following(&state, username, following)?;
+    } else if activity_type == "Undo" {
+        let from = match activity.pointer("/actor").and_then(Value::as_str) {
+            Some(from) => from,
+            None => return Err(anyhow!("no actor in activity")),
+        };
+        remove_follower(&state, username, from)?;
     }
     Ok(())
 }
 
-fn follow_object(activity_type: &str,activity: &Value) -> Result<String,>{
-    match activity.pointer("/object/type").and_then(|v| v.as_str()) {
-        Some(activity) => {
-            if activity != "Follow" {
-                return Err(anyhow!(
-                    "no Follow found in {activity_type}",
-                ));
-            }
-        },
-        None => {
-            return Err(anyhow!(
-                "no `/object/type` found in {activity_type} activity",
-            ));
-        }
-    };
-    let following = match activity.pointer("/object/object").and_then(|v| v.as_str()) {
-        Some(activity) => activity.to_string(),
-        None => {
-            return Err(anyhow!(
-                "no `/object/object` string found in {activity_type} activity",
-            ));
-        }
-    };
-    Ok(following)
+fn follow_object<'a>(activity_type: &str, activity: &'a Value) -> Result<&'a str> {
+    if object_type(activity)? != "Follow" {
+        return Err(anyhow!("no Follow found in {activity_type}",));
+    }
+    object_object(activity)
 }

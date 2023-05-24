@@ -20,9 +20,12 @@ use uuid::Uuid;
 
 use crate::{
     actor::{actor_id, private_key, validate},
-    follow::{accept_following, add_following, reject_following},
+    follow::{accept_following, add_following, reject_following, remove_following},
     object::create_object,
-    protocol::{clean, recipients, Created, JsonLD, ACTIVITIES, ACTIVITY_STREAMS_NS},
+    protocol::{
+        activity_type, clean, object_object, object_type, recipients, Created, JsonLD, ACTIVITIES,
+        ACTIVITY_STREAMS_NS,
+    },
     util::{copy, send_to_recipient, trigger_send_to_recipient},
     AppState,
 };
@@ -90,16 +93,9 @@ pub(crate) async fn post_outbox(
         )));
     }
     let short_id = Uuid::new_v4();
-    let mut activity_type = match new_activity.pointer("/type").and_then(|v| v.as_str()) {
-        Some(activity) => activity.to_string(),
-        None => {
-            return Err(OutboxError::Invalid(String::from(
-                "no `type` found in activity",
-            )))
-        }
-    };
+    let mut activity_type = activity_type(&new_activity)?.to_string();
     if !ACTIVITIES.contains(&activity_type.as_str()) {
-        activity_type = String::from("Create");
+        activity_type = "Create".to_string();
         let mut wrap_activity = json!({
             "@context": ACTIVITY_STREAMS_NS,
             "object": new_activity,
@@ -162,14 +158,7 @@ fn preprocess_activity(
     add(activity, "published", ts.clone())?;
     add(activity, "actor", actor.clone())?;
     if activity_type == "Create" {
-        let object_type = match activity.pointer("/object/type").and_then(|v| v.as_str()) {
-            Some(activity) => activity.to_string(),
-            None => {
-                return Err(OutboxError::Invalid(String::from(
-                    "no `/object/type` found in activity",
-                )));
-            }
-        };
+        let object_type = object_type(activity)?.to_string();
 
         let object_short_id = Uuid::new_v4();
         let object_id = format!(
@@ -211,53 +200,30 @@ fn preprocess_activity(
         };
         Ok(ActivityState::FollowRequest { following })
     } else if activity_type == "Accept" {
-        match activity.pointer("/object/type").and_then(|v| v.as_str()) {
-            Some(activity) => {
-                if activity != "Follow" {
-                    return Err(OutboxError::Invalid(String::from(
-                        "no Follow found in Accept",
-                    )));
-                }
-            }
-            None => {
-                return Err(OutboxError::Invalid(String::from(
-                    "no `/object/type` found in Accept activity",
-                )));
-            }
-        };
-        let following = match activity.pointer("/object/object").and_then(|v| v.as_str()) {
-            Some(activity) => activity.to_string(),
-            None => {
-                return Err(OutboxError::Invalid(String::from(
-                    "no `/object/object` string found in Accept activity",
-                )));
-            }
-        };
+        if object_type(activity)? != "Follow" {
+            return Err(OutboxError::Invalid(String::from(
+                "no Follow found in Accept",
+            )));
+        }
+
+        let following = object_object(activity)?.to_string();
         Ok(ActivityState::FollowAccept { following })
     } else if activity_type == "Reject" {
-        match activity.pointer("/object/type").and_then(|v| v.as_str()) {
-            Some(activity) => {
-                if activity != "Follow" {
-                    return Err(OutboxError::Invalid(String::from(
-                        "no Follow found in Reject",
-                    )));
-                }
-            }
-            None => {
-                return Err(OutboxError::Invalid(String::from(
-                    "no `/object/type` found in Reject activity",
-                )));
-            }
-        };
-        let following = match activity.pointer("/object/object").and_then(|v| v.as_str()) {
-            Some(activity) => activity.to_string(),
-            None => {
-                return Err(OutboxError::Invalid(String::from(
-                    "no `/object/object` string found in Reject activity",
-                )));
-            }
-        };
+        if object_type(activity)? != "Follow" {
+            return Err(OutboxError::Invalid(String::from(
+                "no Follow found in Reject",
+            )));
+        }
+        let following = object_object(activity)?.to_string();
         Ok(ActivityState::FollowReject { following })
+    } else if activity_type == "Undo" {
+        if object_type(activity)? != "Follow" {
+            return Err(OutboxError::Invalid(String::from(
+                "no Follow found in Undo",
+            )));
+        }
+        let following = object_object(activity)?.to_string();
+        Ok(ActivityState::FollowUndo { following })
     } else {
         Ok(ActivityState::Other)
     }
@@ -333,6 +299,11 @@ async fn postprocess_activity(
         ActivityState::FollowReject { following } => {
             reject_following(&state, username, &following)?;
         }
+        ActivityState::FollowUndo { following } => {
+            remove_following(&state, username, &following)?;
+            trigger_send_to_recipient(state, username, following, activity_id, activity, iat)
+                .await?;
+        }
         ActivityState::Other => {}
     }
     Ok(())
@@ -355,6 +326,9 @@ pub enum ActivityState {
     FollowReject {
         following: String,
     },
+    FollowUndo {
+        following: String,
+    },
 }
 
 impl ActivityState {
@@ -365,6 +339,7 @@ impl ActivityState {
             ActivityState::FollowRequest { .. } => None,
             ActivityState::FollowAccept { .. } => None,
             ActivityState::FollowReject { .. } => None,
+            ActivityState::FollowUndo { .. } => None,
         }
     }
 }

@@ -1,3 +1,5 @@
+use anyhow::anyhow;
+use anyhow::Result;
 use async_trait::async_trait;
 use axum::body::HttpBody;
 use axum::extract::rejection::BytesRejection;
@@ -214,6 +216,32 @@ pub(crate) fn clean(value: &mut Value) {
         if let Some(v) = m.get_mut("object") {
             clean(v);
         }
+    }
+}
+pub(crate) fn activity_type(activity: &Value) -> Result<&str> {
+    match activity.pointer("/type").and_then(|v| v.as_str()) {
+        Some(typ) => Ok(typ),
+        None => Err(anyhow!("no `type` found in activity",)),
+    }
+}
+
+pub(crate) fn object_type(activity: &Value) -> Result<&str> {
+    match activity.pointer("/object/type").and_then(|v| v.as_str()) {
+        Some(typ) => Ok(typ),
+        None => Err(anyhow!(
+            "no `/object/type` found in {} activity",
+            activity_type(activity)?
+        )),
+    }
+}
+
+pub(crate) fn object_object(activity: &Value) -> Result<&str> {
+    match activity.pointer("/object/object").and_then(|v| v.as_str()) {
+        Some(typ) => Ok(typ),
+        None => Err(anyhow!(
+            "no `/object/object` found in {} activity",
+            activity_type(activity)?
+        )),
     }
 }
 

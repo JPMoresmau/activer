@@ -137,6 +137,19 @@ pub(crate) fn add_follower(
     Ok(())
 }
 
+pub(crate) fn remove_follower(
+    state: &AppState,
+    username: &str,
+    id: &str,
+) -> Result<(), FollowError> {
+    let conn = &state.conn()?;
+    conn.execute(
+        "DELETE FROM Followers WHERE username = ?1 AND follower = ?2",
+        (username, id),
+    )?;
+    Ok(())
+}
+
 pub(crate) fn add_following(state: &AppState, username: &str, id: &str, iat: i64) -> Result<()> {
     let conn = &state.conn()?;
     conn.execute(
@@ -159,6 +172,15 @@ pub(crate) fn reject_following(state: &AppState, username: &str, id: &str) -> Re
     let conn = &state.conn()?;
     conn.execute(
         "UPDATE Following SET accepted=-1 WHERE username=?1 AND following = ?2",
+        (username, id),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn remove_following(state: &AppState, username: &str, id: &str) -> Result<()> {
+    let conn = &state.conn()?;
+    conn.execute(
+        "DELETE FROM Following WHERE username=?1 AND following = ?2",
         (username, id),
     )?;
     Ok(())
